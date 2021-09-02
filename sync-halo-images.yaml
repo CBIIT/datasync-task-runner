@@ -1,0 +1,316 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  Creates the HALO Images DataSync stack
+  - create the datasync task given a source and destination ARN
+  - create the log group for the datasync task
+  - create an sns topic for the datasync task
+  - create a lambda function to execute the datasync task
+    - TaskArn should be specified as an environmental variable
+    - Daily trigger should be created in cloudwatch events. No parameters.
+    - Permissions - execute specified datasync task
+  - create a lambda function to send a notification once task execution completes (either in success or failure)
+    - TaskArn should be specified as an environmental variable
+    - SNSTopicArn should be specified as an environmental variable
+    - Cloudwatch task execution change event trigger should be created in cloudwatch events.
+    - Permissions - publish to specified sns topic, read cloudwatch logs events from log group
+
+Parameters:
+  SourceLocationId: 
+    Description: DataSync source location ID
+    Type: String
+  DestinationLocationId: 
+    Description: DataSync destination location ID
+    Type: String
+  NotificationEmail:
+    Description: Email address to receive notifications (usually a mailing list)
+    Type: String
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - Label: 
+          default: DataSync Locations
+        Parameters: 
+          - SourceLocationId
+          - DestinationLocationId
+      - Label: 
+          default: Notifications
+        Parameters: 
+          - NotificationEmail
+
+Resources:
+
+  ##########################
+  # Create a DataSync task #
+  ##########################
+
+  # Creates a CloudWatch log group for the DataSync task which retains entries for 180 days
+  HaloImagesDataSyncTaskLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: HaloImagesDataSyncTask
+      RetentionInDays: 180
+
+  # Creates a CloudWatch Logs resource policy which allows DataSync to create log streams and to put log events for the specified log group
+  HaloImagesDataSyncTaskLogsResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: HaloImagesDataSyncTaskLogsResourcePolicy
+      PolicyDocument: !Sub "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Sid\": \"HaloImagesDataSyncTaskLogsResourcePolicy\", \"Effect\": \"Allow\", \"Principal\": { \"Service\": [ \"datasync.amazonaws.com\" ] }, \"Action\": [ \"logs:PutLogEvents\", \"logs:CreateLogStream\" ], \"Resource\": \"${HaloImagesDataSyncTaskLogGroup.Arn}\" } ] }"
+    DependsOn: HaloImagesDataSyncTaskLogGroup
+
+  # Creates a DataSync task from the provided source and destination
+  HaloImagesDataSyncTask:
+    Type: "AWS::DataSync::Task"
+    Properties:
+      Name: Halo Images DataSync Task
+      # CloudWatchLogGroupArn: !GetAtt HaloImagesDataSyncTaskLogGroup.Arn # wildcard is not supported
+      CloudWatchLogGroupArn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${HaloImagesDataSyncTaskLogGroup}"
+      SourceLocationArn: !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${SourceLocationId}"
+      DestinationLocationArn: !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${DestinationLocationId}"
+      Options: 
+          LogLevel: TRANSFER
+          OverwriteMode: ALWAYS
+          PreserveDeletedFiles: PRESERVE
+          TaskQueueing: ENABLED
+          TransferMode: CHANGED
+          VerifyMode: ONLY_FILES_TRANSFERRED
+    DependsOn: HaloImagesDataSyncTaskLogGroup
+
+
+  #############################################################
+  # Create a Lambda function which executes the DataSync task #
+  #############################################################
+
+  # Creates a CloudWatch log group for a Lambda function which executes the DataSync task
+  HaloImagesDataSyncTaskExecutionLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: /aws/lambda/HaloImagesDataSyncTask
+      RetentionInDays: 180
+
+  # Creates an IAM role for a Lambda function which executes the DataSync task
+  HaloImagesDataSyncTaskExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service:
+                - lambda.amazonaws.com
+            Action:
+               "sts:AssumeRole"
+      Policies:
+        - PolicyName: HaloImagesDataSyncTaskExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !GetAtt HaloImagesDataSyncTaskExecutionLogGroup.Arn
+              - Effect: Allow
+                Action: 
+                  - "datasync:StartTaskExecution"
+                Resource: !GetAtt HaloImagesDataSyncTask.TaskArn
+    DependsOn: 
+      - HaloImagesDataSyncTask
+      - HaloImagesDataSyncTaskExecutionLogGroup
+
+  # Creates a Lambda function which executes the DataSync task
+  HaloImagesDataSyncTaskExecutionLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: HaloImagesDataSyncTask
+      Description: Syncs HALO images on a daily basis
+      Handler: index.lambda_handler
+      MemorySize: 256
+      Timeout: 900
+      Runtime: python3.9
+      Role: !GetAtt HaloImagesDataSyncTaskExecutionRole.Arn
+      Environment:
+        Variables:
+          TaskArn: !GetAtt HaloImagesDataSyncTask.TaskArn
+      Code: 
+        ZipFile: |
+          import json
+          from datetime import date, timedelta
+          from os import getenv
+          from boto3 import client
+
+          def lambda_handler(event, context):
+              # assume folder name is YYYY-MM-DD
+              yesterday = date.today() - timedelta(days=1)
+              sync_folder = "/" + yesterday.strftime("%Y-%m-%d")
+
+              print(getenv("TaskArn"))
+              print(sync_folder)
+
+              # execute task and return task execution ARN
+              return client("datasync").start_task_execution(
+                TaskArn=getenv("TaskArn"),
+                Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}]
+              )
+    DependsOn: 
+      - HaloImagesDataSyncTask
+      - HaloImagesDataSyncTaskExecutionRole
+
+  # Creates an EventBridge Rule which executes the DataSync task on a daily basis (at 23:00)
+  HaloImagesDataSyncTaskExecutionEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: HaloImagesDataSyncTaskExecution
+      Description: Executes the HaloImagesDataSyncTask Lambda function on a daily basis
+      Targets:
+        - Id: !Ref HaloImagesDataSyncTaskExecutionLambda
+          Arn: !GetAtt HaloImagesDataSyncTaskExecutionLambda.Arn
+      ScheduleExpression: cron(0 23 * * ? *)
+    DependsOn: 
+      - HaloImagesDataSyncTaskExecutionLambda
+  
+  # Grants permission for the HaloImagesDataSyncTaskExecutionEventRule to invoke the HaloImagesDataSyncTaskExecutionLambda function
+  HaloImagesDataSyncTaskExecutionLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt HaloImagesDataSyncTaskExecutionLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HaloImagesDataSyncTaskExecutionEventRule.Arn
+    DependsOn:
+      - HaloImagesDataSyncTaskExecutionEventRule
+      - HaloImagesDataSyncTaskExecutionLambda
+
+
+  ##################################################################################################
+  # Create an SNS Topic and a Lambda function which publishes status updates for the DataSync task #
+  ##################################################################################################
+
+  # Creates a SNS topic and a subscription for receiving updates about DataSync task execution status
+  HaloImagesDataSyncTaskNotificationsTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: HaloImagesDatasyncNotifications
+      Subscription:
+        - Protocol: email-json
+          Endpoint: !Ref NotificationEmail
+
+  # Creates a CloudWatch log group for a Lambda function which publishes updates about DataSync task execution status
+  HaloImagesDataSyncTaskNotificationsLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: /aws/lambda/HaloImagesDataSyncTaskNotifications
+      RetentionInDays: 180
+
+  # Creates an IAM role for a Lambda function which publishes updates about DataSync task execution status
+  HaloImagesDataSyncTaskNotificationsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service:
+                - lambda.amazonaws.com
+            Action:
+               "sts:AssumeRole"
+      Policies:
+        - PolicyName: HaloImagesDataSyncTaskNotificationsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !GetAtt HaloImagesDataSyncTaskNotificationsLogGroup.Arn
+              - Effect: Allow
+                Action: 
+                  - "logs:DescribeLogStreams"
+                  - "logs:GetLogEvents"
+                Resource: !GetAtt HaloImagesDataSyncTaskLogGroup.Arn
+              - Effect: Allow
+                Action: 
+                  - "datasync:DescribeTask"
+                Resource: !GetAtt HaloImagesDataSyncTask.TaskArn
+              - Effect: Allow
+                Action: 
+                  - "datasync:DescribeTaskExecution"
+                Resource: !Sub "${HaloImagesDataSyncTask.TaskArn}/execution/*"
+              - Effect: Allow
+                Action:
+                  - "sns:Publish"
+                Resource: !Ref HaloImagesDataSyncTaskNotificationsTopic
+    DependsOn: 
+      - HaloImagesDataSyncTask
+      - HaloImagesDataSyncTaskLogGroup
+      - HaloImagesDataSyncTaskNotificationsLogGroup
+
+  # Creates a Lambda function which publishes updates about DataSync task execution status
+  HaloImagesDataSyncTaskNotificationsLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: HaloImagesDataSyncTaskNotifications
+      Description: Publishes updates about HALO image sync status
+      Handler: index.lambda_handler
+      MemorySize: 256
+      Timeout: 900
+      Runtime: python3.9
+      Role: !GetAtt HaloImagesDataSyncTaskNotificationsRole.Arn
+      Environment:
+        Variables:
+          TaskArn: !GetAtt HaloImagesDataSyncTask.TaskArn
+          LogGroupArn: !GetAtt HaloImagesDataSyncTaskLogGroup.Arn
+          TopicArn: !Ref HaloImagesDataSyncTaskNotificationsTopic
+      Code: 
+        ZipFile: |
+          import json
+          from os import getenv
+          from boto3 import client
+
+          def lambda_handler(event, context):
+              print(event)
+              return client("sns").publish(
+                TopicArn=getenv("TopicArn"),
+                Message=json.dumps(event)
+              )
+    DependsOn: 
+      - HaloImagesDataSyncTask
+      - HaloImagesDataSyncTaskLogGroup
+      - HaloImagesDataSyncTaskNotificationsRole
+      - HaloImagesDataSyncTaskNotificationsTopic
+
+  # Creates an EventBridge Rule which send DataSync task execution state change events to a Lambda function
+  HaloImagesDataSyncTaskNotificationsEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: HaloImagesDataSyncTaskNotifications
+      Description: Send DataSync task execution state change events to a Lambda function
+      EventPattern:
+        source: 
+          - aws.datasync
+        detail-type: 
+          - DataSync Task Execution State Change
+        resources:
+          - prefix: !Sub "${HaloImagesDataSyncTask.TaskArn}/execution/"
+      Targets:
+        - Id: !Ref HaloImagesDataSyncTaskNotificationsLambda
+          Arn: !GetAtt HaloImagesDataSyncTaskNotificationsLambda.Arn
+    DependsOn: 
+      - HaloImagesDataSyncTask
+      - HaloImagesDataSyncTaskNotificationsLambda
+  
+  # Grants permission for the HaloImagesDataSyncTaskNotificationsEventRule to invoke the HaloImagesDataSyncTaskNotificationsLambda function
+  HaloImagesDataSyncTaskNotificationsLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt HaloImagesDataSyncTaskNotificationsLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HaloImagesDataSyncTaskNotificationsEventRule.Arn
+    DependsOn:
+      - HaloImagesDataSyncTaskNotificationsEventRule
+      - HaloImagesDataSyncTaskNotificationsLambda

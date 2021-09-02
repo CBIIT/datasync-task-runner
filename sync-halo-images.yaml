@@ -265,19 +265,19 @@ Resources:
           sns_client = client("sns")
 
           def lambda_handler(event, context):
-              print(event)
-
               execution_status = datasync_client.describe_task_execution(
                   TaskExecutionArn=event['resources'][0]
               )
 
-              message = dedent(f"""
-                  Dear Administrator,
+              print(event)
+              print(execution_status)
 
-                  The following is a summary of the HALO images DataSync task which started at: {execution_status["StartTime"]}.
-                  For more information, see the CloudWatch log group: HaloImagesDataSyncTask
+              message = dedent(f"""
+                  Dear Administrators,
+
+                  The HALO DataSync task which started on {execution_status["StartTime"]} has completed execution with the following status: {execution_status["Status"]}.
+                  For more information about individual files transferred, review the following CloudWatch log group: HaloImagesDataSyncTask
                   
-                  Status: {execution_status["Status"]}
                   Start Time: {execution_status["StartTime"]}
                   Total Duration: {execution_status["Result"]["TotalDuration"]}
                   Files Transferred: {execution_status["FilesTransferred"]}

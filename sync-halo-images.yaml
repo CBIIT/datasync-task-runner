@@ -1,18 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: |
-  Creates the HALO Images DataSync stack
-  - create the datasync task given a source and destination ARN
-  - create the log group for the datasync task
-  - create an sns topic for the datasync task
-  - create a lambda function to execute the datasync task
-    - TaskArn should be specified as an environmental variable
-    - Daily trigger should be created in cloudwatch events. No parameters.
-    - Permissions - execute specified datasync task
-  - create a lambda function to send a notification once task execution completes (either in success or failure)
-    - TaskArn should be specified as an environmental variable
-    - SNSTopicArn should be specified as an environmental variable
-    - Cloudwatch task execution change event trigger should be created in cloudwatch events.
-    - Permissions - publish to specified sns topic, read cloudwatch logs events from log group
+Description: Creates a serverless application which executes a DataSync task daily and sends notifications on success or failure.
 
 Parameters:
   SourceLocationId: 
@@ -133,6 +120,7 @@ Resources:
       Role: !GetAtt HaloImagesDataSyncTaskExecutionRole.Arn
       Environment:
         Variables:
+          TZ: America/New_York
           TaskArn: !GetAtt HaloImagesDataSyncTask.TaskArn
       Code: 
         ZipFile: |
@@ -192,9 +180,9 @@ Resources:
   HaloImagesDataSyncTaskNotificationsTopic:
     Type: "AWS::SNS::Topic"
     Properties:
-      TopicName: HaloImagesDatasyncNotifications
+      TopicName: HaloImagesDataSyncNotifications
       Subscription:
-        - Protocol: email-json
+        - Protocol: email
           Endpoint: !Ref NotificationEmail
 
   # Creates a CloudWatch log group for a Lambda function which publishes updates about DataSync task execution status
@@ -262,6 +250,7 @@ Resources:
       Role: !GetAtt HaloImagesDataSyncTaskNotificationsRole.Arn
       Environment:
         Variables:
+          TZ: America/New_York
           TaskArn: !GetAtt HaloImagesDataSyncTask.TaskArn
           LogGroupArn: !GetAtt HaloImagesDataSyncTaskLogGroup.Arn
           TopicArn: !Ref HaloImagesDataSyncTaskNotificationsTopic
@@ -269,13 +258,39 @@ Resources:
         ZipFile: |
           import json
           from os import getenv
+          from textwrap import dedent
           from boto3 import client
+          
+          datasync_client = client("datasync")
+          sns_client = client("sns")
 
           def lambda_handler(event, context):
               print(event)
-              return client("sns").publish(
-                TopicArn=getenv("TopicArn"),
-                Message=json.dumps(event)
+
+              execution_status = datasync_client.describe_task_execution(
+                  TaskExecutionArn=event['resources'][0]
+              )
+
+              message = dedent(f"""
+                  Dear Administrator,
+
+                  The following is a summary of the HALO images DataSync task which started at: {execution_status["StartTime"]}.
+                  For more information, see the CloudWatch log group: HaloImagesDataSyncTask
+                  
+                  Status: {execution_status["Status"]}
+                  Start Time: {execution_status["StartTime"]}
+                  Total Duration: {execution_status["Result"]["TotalDuration"]}
+                  Files Transferred: {execution_status["FilesTransferred"]}
+                  GBs Transferred: {execution_status["BytesTransferred"] / 1e9}""")
+
+              if execution_status["Status"] == "ERROR":
+                  message += dedent(f"""
+                      Error Code: {execution_status["Result"]["ErrorCode"]}
+                      Error Details: {execution_status["Result"]["ErrorDetail"]}""")
+
+              return sns_client.publish(
+                  TopicArn=getenv("TopicArn"),
+                  Message=message
               )
     DependsOn: 
       - HaloImagesDataSyncTask
@@ -296,6 +311,10 @@ Resources:
           - DataSync Task Execution State Change
         resources:
           - prefix: !Sub "${HaloImagesDataSyncTask.TaskArn}/execution/"
+        detail:
+          State:
+            - ERROR
+            - SUCCESS
       Targets:
         - Id: !Ref HaloImagesDataSyncTaskNotificationsLambda
           Arn: !GetAtt HaloImagesDataSyncTaskNotificationsLambda.Arn

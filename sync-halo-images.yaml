@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Creates a serverless application which executes a DataSync task daily and sends notifications on success or failure.
+Description: Creates a serverless application which executes a DataSync on a schedule and sends notifications on success or failure.
 
 Parameters:
   TaskName:
@@ -267,6 +267,7 @@ Resources:
       Environment:
         Variables:
           TZ: America/New_York
+          TaskName: !Ref TaskName
           TaskArn: !GetAtt DataSyncTask.TaskArn
           LogGroupArn: !GetAtt DataSyncTaskLogGroup.Arn
           TopicArn: !Ref DataSyncTaskNotificationsTopic
@@ -281,8 +282,10 @@ Resources:
           sns_client = client("sns")
 
           def lambda_handler(event, context):
+              task_execution_arn = event['resources'][0]
+
               execution_status = datasync_client.describe_task_execution(
-                  TaskExecutionArn=event['resources'][0]
+                  TaskExecutionArn=task_execution_arn
               )
 
               print(event)
@@ -294,6 +297,9 @@ Resources:
                   The HALO DataSync task which started on {execution_status["StartTime"]} has completed execution with the following status: {execution_status["Status"]}.
                   For more information about individual files transferred, review the following CloudWatch log group: {getenv("LogGroupArn")}
                   
+                  Task Name: {getenv("TaskName")}
+                  Task ARN: {getenv("TaskArn")}
+                  Task Execution ARN: {task_execution_arn}
                   Start Time: {execution_status["StartTime"]}
                   Total Duration: {execution_status["Result"]["TotalDuration"]}
                   Files Transferred: {execution_status["FilesTransferred"]}
@@ -306,6 +312,7 @@ Resources:
 
               return sns_client.publish(
                   TopicArn=getenv("TopicArn"),
+                  Subject=f"""DataSync Task ({getenv("TaskName")}) - {execution_status["Status"]}""",
                   Message=message
               )
     DependsOn: 

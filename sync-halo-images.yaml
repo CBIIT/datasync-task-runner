@@ -291,6 +291,10 @@ Resources:
               print(event)
               print(execution_status)
 
+              total_duration = execution_status["Result"]["TotalDuration"]
+              total_duration_minutes = int(total_duration / 60)
+              total_duration_seconds = total_duration % 60
+
               message = dedent(f"""
                   Dear Administrators,
 
@@ -301,7 +305,7 @@ Resources:
                   Task ARN: {getenv("TaskArn")}
                   Task Execution ARN: {task_execution_arn}
                   Start Time: {execution_status["StartTime"]}
-                  Total Duration: {execution_status["Result"]["TotalDuration"]}
+                  Total Duration: {total_duration_minutes} minute(s), {total_duration_seconds} second(s)
                   Files Transferred: {execution_status["FilesTransferred"]}
                   GBs Transferred: {execution_status["BytesTransferred"] / 1e9}""")
 

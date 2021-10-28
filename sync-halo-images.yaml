@@ -291,6 +291,11 @@ Resources:
               print(event)
               print(execution_status)
 
+              should_publish_notification = execution_status["Status"] == "ERROR" or execution_status["BytesTransferred"] > 0
+
+              if not should_publish_notification:
+                return null
+
               total_duration = execution_status["Result"]["TotalDuration"]
               total_duration_minutes = int(total_duration / 60)
               total_duration_seconds = total_duration % 60

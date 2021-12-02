@@ -58,7 +58,7 @@ Resources:
   DataSyncTaskLogsResourcePolicy:
     Type: AWS::Logs::ResourcePolicy
     Properties:
-      PolicyName: DataSyncTaskLogsResourcePolicy
+      PolicyName: !Sub "${TaskName}DataSyncTaskLogsResourcePolicy" 
       PolicyDocument: !Sub "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Sid\": \"${TaskName}DataSyncTaskLogsResourcePolicy\", \"Effect\": \"Allow\", \"Principal\": { \"Service\": [ \"datasync.amazonaws.com\" ] }, \"Action\": [ \"logs:PutLogEvents\", \"logs:CreateLogStream\" ], \"Resource\": \"${DataSyncTaskLogGroup.Arn}\" } ] }"
     DependsOn: DataSyncTaskLogGroup
 

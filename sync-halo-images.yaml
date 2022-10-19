@@ -19,6 +19,21 @@ Parameters:
     Description: A cron expression (in UTC time) which specifies when this task should be run.
     Type: String
     Default: "cron(0 23 * * ? *)"
+  DestinationBucket:
+    Description: Destination S3 bucket
+    Type: String
+  FileOwner:
+    Description: SMB file owner
+    Type: String
+  FileGroup:
+    Description: SMB file group
+    Type: String
+  FilePermissions:
+    Description: SMB file permissions
+    Type: String
+  FileAcl:
+    Description: SMB file ACL
+    Type: String
 
 Metadata: 
   AWS::CloudFormation::Interface: 
@@ -40,6 +55,14 @@ Metadata:
           default: Notifications
         Parameters: 
           - NotificationEmail
+      - Label: 
+          default: S3 Destination Metadata
+        Parameters: 
+          - DestinationBucket
+          - FileOwner
+          - FileGroup
+          - FilePermissions
+          - FileAcl
 
 Resources:
 
@@ -366,3 +389,238 @@ Resources:
     DependsOn:
       - DataSyncTaskNotificationsEventRule
       - DataSyncTaskNotificationsLambda
+
+  #################################################################################################
+  # Create a Lambda function which updates S3 object metadata for Storage Gateway SMB permissions #
+  #################################################################################################
+
+  # Creates a CloudWatch log group for a Lambda function which updates S3 object metadata for SMB permissions
+  UpdateS3ObjectMetadataLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: !Sub "/aws/lambda/${TaskName}UpdateS3ObjectMetadata"
+      RetentionInDays: 180
+
+  # Creates an IAM role for a Lambda function which modifies S3 object metadata for a given sync target
+  UpdateS3ObjectMetadataRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service:
+                - lambda.amazonaws.com
+            Action:
+               "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "${TaskName}UpdateS3ObjectMetadataPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !GetAtt UpdateS3ObjectMetadataLogGroup.Arn
+              - Effect: Allow
+                Action: 
+                  - "logs:DescribeLogStreams"
+                  - "logs:GetLogEvents"
+                  - "logs:FilterLogEvents"
+                Resource: !GetAtt DataSyncTaskLogGroup.Arn
+              - Effect: Allow
+                Action: 
+                  - "datasync:DescribeTask"
+                Resource: !GetAtt DataSyncTask.TaskArn
+              - Effect: Allow
+                Action: 
+                  - "datasync:DescribeTaskExecution"
+                Resource: !Sub "${DataSyncTask.TaskArn}/execution/*"
+              - Effect: Allow
+                Action: 
+                  - "datasync:DescribeLocation*"
+                Resource: 
+                  - !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${SourceLocationId}"
+                  - !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${DestinationLocationId}"
+              - Effect: Allow
+                Action:
+                  - "sns:Publish"
+                Resource: !Ref DataSyncTaskNotificationsTopic
+              - Effect: Allow
+                Action:
+                  - "s3:DeleteObject*"
+                  - "s3:GetObject*"
+                  - "s3:PutObject*"
+                Resource: 
+                  - !Sub "arn:aws:s3:::${DestinationBucket}/*"
+
+  # Creates a Lambda function which publishes updates about DataSync task execution status
+  UpdateS3ObjectMetadataLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub "${TaskName}UpdateS3ObjectMetadata"
+      Description: !Sub "${TaskName} - Updates S3 object metadata for SMB permissions" 
+      Handler: index.lambda_handler
+      MemorySize: 4196
+      Timeout: 900
+      Runtime: python3.9
+      Role: !GetAtt UpdateS3ObjectMetadataRole.Arn
+      Environment:
+        Variables:
+          TZ: America/New_York
+          TaskName: !Ref TaskName
+          TaskArn: !GetAtt DataSyncTask.TaskArn
+          LogGroupArn: !GetAtt DataSyncTaskLogGroup.Arn
+          LogGroupName: !Ref DataSyncTaskLogGroup
+          LambdaLogGroupArn: !GetAtt UpdateS3ObjectMetadataLogGroup.Arn
+          TopicArn: !Ref DataSyncTaskNotificationsTopic
+          SourceLocationArn: !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${SourceLocationId}"
+          DestinationLocationArn: !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${DestinationLocationId}"
+          DestinationBucket: !Ref DestinationBucket
+          FileOwner: !Ref FileOwner
+          FileGroup: !Ref FileGroup
+          FilePermissions: !Ref FilePermissions
+          FileAcl: !Ref FileAcl
+      Code: 
+        ZipFile: |
+            import json
+            from os import getenv
+            from textwrap import dedent
+            from boto3 import client
+            from re import match, sub
+            from traceback import print_exc
+            from multiprocessing import Process
+
+            datasync_client = client("datasync")
+            logs_client = client("logs")
+            sns_client = client("sns")
+            s3_client = client("s3")
+
+            def get_synced_object_keys(execution_status):
+                task_execution_arn = execution_status["TaskExecutionArn"]
+                destination_bucket = getenv("DestinationBucket")
+                _, task_id, _, execution_id = task_execution_arn.split("/")
+
+                destination_location = datasync_client.describe_location_s3(
+                    LocationArn=getenv("DestinationLocationArn")
+                )
+
+                key_prefix = destination_location["LocationUri"].replace(
+                    f"s3://{destination_bucket}/", ""
+                )
+
+                paginator = logs_client.get_paginator('filter_log_events')
+                response_iterator = paginator.paginate(
+                    logGroupName=getenv("LogGroupName"),
+                    logStreamNames=[f"{task_id}-{execution_id}"],
+                    filterPattern='NOTICE Transferred file',
+                )
+
+                object_keys = []
+                for log_events in response_iterator:
+                    for event in log_events["events"]:
+                        matched_event = match("\[NOTICE\] Transferred file (.*), \d+ bytes", event['message'])
+                        if matched_event is not None:
+                            key = key_prefix + matched_event[1]
+                            key = sub("/+", "/", key)
+                            object_keys.append(key)
+
+                return object_keys
+
+
+            def update_smb_metadata(bucket, key):
+                s3_object_head = s3_client.head_object(Bucket=bucket, Key=key)
+                s3_object_metadata = s3_object_head["Metadata"]
+                s3_object_metadata_new = {}
+
+                # Set object SMB permissions and associated gateway metadata
+                s3_object_metadata_new["file-owner"] = getenv("FileOwner")
+                s3_object_metadata_new["file-permissions"] = getenv("FilePermissions")
+                s3_object_metadata_new["file-group"] = getenv("FileGroup")
+                s3_object_metadata_new["file-acl"] = getenv("FileAcl")
+
+                # Preserve metadata set by HALO
+                if "file-ctime" in s3_object_metadata:
+                    s3_object_metadata_new["file-ctime"] = s3_object_metadata["file-ctime"]
+                if "file-mtime" in s3_object_metadata:
+                    s3_object_metadata_new["file-mtime"] = s3_object_metadata["file-mtime"]
+
+                return s3_client.copy_object(
+                    Key=key,
+                    Bucket=bucket,
+                    CopySource={"Bucket": bucket, "Key": key},
+                    Metadata=s3_object_metadata_new,
+                    MetadataDirective="REPLACE",
+                    StorageClass="INTELLIGENT_TIERING",
+                )
+
+
+            def lambda_handler(event, context):
+                task_execution_arn = event["resources"][0]
+                task_name = getenv("TaskName")
+                bucket = getenv("DestinationBucket")
+
+                execution_status = datasync_client.describe_task_execution(
+                    TaskExecutionArn=task_execution_arn
+                )
+
+                if execution_status["Status"] == "ERROR":
+                    print("Task execution failed, aborting")
+
+                else:
+                    print("Updating S3 object metadata")
+                    
+
+                    try:
+                        processes = []
+                        for key in get_synced_object_keys(execution_status):
+                            print(f"Update metadata: s3://{bucket}/{key}")
+                            # update_smb_metadata(bucket, key) in parallel
+                            p = Process(target=update_smb_metadata, args = [bucket, key])
+                            p.start()
+                            processes.append(p)
+                        for p in processes:
+                            p.join()
+                    except Exception as error:
+                        print_exc()
+                        sns_client.publish(
+                            TopicArn=getenv("TopicArn"),
+                            Subject=f"DataSync Task ({task_name}) - SMB PERMISSIONS ERROR",
+                            Message=dedent(
+                                f"""\
+                                Dear Administrators,
+
+                                The HALO DataSync task which started on {execution_status['StartTime']} failed to set SMB permissions on S3 object metadata. For more information, please review the following log group: {getenv("LambdaLogGroupArn")}"""
+                            ),
+                        )
+
+  # Creates an EventBridge Rule which send DataSync task execution state change events to a Lambda function
+  UpdateS3ObjectMetadataEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Sub "${TaskName}UpdateS3ObjectMetadata"
+      Description: !Sub "${TaskName}UpdateS3ObjectMetadata - Executes the specified Lambda function whenever the task's execution state changes"
+      EventPattern:
+        source: 
+          - aws.datasync
+        detail-type: 
+          - DataSync Task Execution State Change
+        resources:
+          - prefix: !Sub "${DataSyncTask.TaskArn}/execution/"
+        detail:
+          State:
+            - SUCCESS
+      Targets:
+        - Id: !Ref UpdateS3ObjectMetadataLambda
+          Arn: !GetAtt UpdateS3ObjectMetadataLambda.Arn
+
+  # Grants permission to invoke the UpdateS3ObjectMetadataLambda function
+  UpdateS3ObjectMetadataLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !GetAtt UpdateS3ObjectMetadataLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UpdateS3ObjectMetadataEventRule.Arn

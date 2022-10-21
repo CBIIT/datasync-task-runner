@@ -566,35 +566,28 @@ Resources:
                     TaskExecutionArn=task_execution_arn
                 )
 
-                if execution_status["Status"] == "ERROR":
-                    print("Task execution failed, aborting")
+                try:
+                    processes = []
+                    for key in get_synced_object_keys(execution_status):
+                        print(f"Update metadata: s3://{bucket}/{key}")
+                        # update_smb_metadata(bucket, key) in parallel
+                        p = Process(target=update_smb_metadata, args = [bucket, key])
+                        p.start()
+                        processes.append(p)
+                    for p in processes:
+                        p.join()
+                except Exception as error:
+                    print_exc()
+                    sns_client.publish(
+                        TopicArn=getenv("TopicArn"),
+                        Subject=f"DataSync Task ({task_name}) - SMB PERMISSIONS ERROR",
+                        Message=dedent(
+                            f"""\
+                            Dear Administrators,
 
-                else:
-                    print("Updating S3 object metadata")
-                    
-
-                    try:
-                        processes = []
-                        for key in get_synced_object_keys(execution_status):
-                            print(f"Update metadata: s3://{bucket}/{key}")
-                            # update_smb_metadata(bucket, key) in parallel
-                            p = Process(target=update_smb_metadata, args = [bucket, key])
-                            p.start()
-                            processes.append(p)
-                        for p in processes:
-                            p.join()
-                    except Exception as error:
-                        print_exc()
-                        sns_client.publish(
-                            TopicArn=getenv("TopicArn"),
-                            Subject=f"DataSync Task ({task_name}) - SMB PERMISSIONS ERROR",
-                            Message=dedent(
-                                f"""\
-                                Dear Administrators,
-
-                                The HALO DataSync task which started on {execution_status['StartTime']} failed to set SMB permissions on S3 object metadata. For more information, please review the following log group: {getenv("LambdaLogGroupArn")}"""
-                            ),
-                        )
+                            The HALO DataSync task which started on {execution_status['StartTime']} failed to set SMB permissions on S3 object metadata. For more information, please review the following log group: {getenv("LambdaLogGroupArn")}"""
+                        ),
+                    )
 
   # Creates an EventBridge Rule which send DataSync task execution state change events to a Lambda function
   UpdateS3ObjectMetadataEventRule:

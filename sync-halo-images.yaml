@@ -179,7 +179,8 @@ Resources:
               # execute task and return task execution ARN
               return client("datasync").start_task_execution(
                 TaskArn=getenv("TaskArn"),
-                Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}]
+                Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}],
+                OverrideOptions={"TransferMode": "ALL"}
               )
     DependsOn: 
       - DataSyncTask
@@ -300,6 +301,7 @@ Resources:
           from os import getenv
           from textwrap import dedent
           from boto3 import client
+          from datetime import timedelta
           
           datasync_client = client("datasync")
           sns_client = client("sns")
@@ -321,8 +323,7 @@ Resources:
                 return None
 
               total_duration = execution_status["Result"]["TotalDuration"]
-              total_duration_minutes = int(total_duration / 60)
-              total_duration_seconds = total_duration % 60
+              total_duration_formatted = str(timedelta(milliseconds = total_duration))
 
               message = dedent(f"""
                   Dear Administrators,
@@ -334,7 +335,7 @@ Resources:
                   Task ARN: {getenv("TaskArn")}
                   Task Execution ARN: {task_execution_arn}
                   Start Time: {execution_status["StartTime"]}
-                  Total Duration: {total_duration_minutes} minute(s), {total_duration_seconds} second(s)
+                  Total Duration (H:M:S): {total_duration_formatted}
                   Files Transferred: {execution_status["FilesTransferred"]}
                   GBs Transferred: {execution_status["BytesTransferred"] / 1e9}""")
 
@@ -492,6 +493,7 @@ Resources:
             from re import match, sub
             from traceback import print_exc
             from multiprocessing import Process
+            from time import sleep
 
             datasync_client = client("datasync")
             logs_client = client("logs")
@@ -561,6 +563,8 @@ Resources:
                 task_execution_arn = event["resources"][0]
                 task_name = getenv("TaskName")
                 bucket = getenv("DestinationBucket")
+                print(task_execution_arn)
+                sleep(60) # allow DataSync logs to settle
 
                 execution_status = datasync_client.describe_task_execution(
                     TaskExecutionArn=task_execution_arn

@@ -487,7 +487,7 @@ Resources:
       Code: 
         ZipFile: |
             import json
-            from os import getenv
+            from os import getenv, path
             from textwrap import dedent
             from boto3 import client
             from re import match, sub
@@ -521,15 +521,20 @@ Resources:
                 )
 
                 object_keys = []
+                folder_keys = []
+                
                 for log_events in response_iterator:
                     for event in log_events["events"]:
                         matched_event = match("\[NOTICE\] Transferred file (.*), \d+ bytes", event['message'])
                         if matched_event is not None:
                             key = key_prefix + matched_event[1]
-                            key = sub("/+", "/", key)
-                            object_keys.append(key)
+                            object_key = sub("/+", "/", key)
+                            folder_key = path.dirname(object_key) + "/"
 
-                return object_keys
+                            object_keys.append(object_key)
+                            folder_keys.append(folder_key)
+
+                return list(set(object_keys + folder_keys))
 
 
             def update_smb_metadata(bucket, key):

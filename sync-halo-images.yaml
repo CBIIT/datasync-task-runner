@@ -534,7 +534,7 @@ Resources:
                             object_keys.append(object_key)
                             folder_keys.append(folder_key)
 
-                return list(set(object_keys + folder_keys))
+                return list(set(object_keys + folder_keys + [key_prefix]))
 
 
             def update_smb_metadata(bucket, key):

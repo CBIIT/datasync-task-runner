@@ -34,6 +34,11 @@ Parameters:
   FileAcl:
     Description: SMB file ACL
     Type: String
+  SyncAllFiles:
+    Description: Sync all files in the source location
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
 
 Metadata: 
   AWS::CloudFormation::Interface: 
@@ -48,9 +53,10 @@ Metadata:
           - SourceLocationId
           - DestinationLocationId
       - Label: 
-          default: Schedule
+          default: Configuration
         Parameters: 
           - TaskSchedule
+          - SyncAllFiles
       - Label: 
           default: Notifications
         Parameters: 
@@ -161,6 +167,7 @@ Resources:
         Variables:
           TZ: America/New_York
           TaskArn: !GetAtt DataSyncTask.TaskArn
+          SyncAllFiles: !Ref SyncAllFiles
       Code: 
         ZipFile: |
           import json
@@ -177,11 +184,17 @@ Resources:
               print(sync_folder)
 
               # execute task and return task execution ARN
-              return client("datasync").start_task_execution(
-                TaskArn=getenv("TaskArn"),
-                Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}],
-                OverrideOptions={"TransferMode": "ALL"}
-              )
+              if getenv("SyncAllFiles") == "true":
+                  return client("datasync").start_task_execution(
+                      TaskArn=getenv("TaskArn"),
+                      OverrideOptions={"TransferMode": "ALL"}
+                  )
+              else:
+                  return client("datasync").start_task_execution(
+                    TaskArn=getenv("TaskArn"),
+                    Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}],
+                    OverrideOptions={"TransferMode": "ALL"}
+                  )
     DependsOn: 
       - DataSyncTask
       - DataSyncTaskExecutionRole

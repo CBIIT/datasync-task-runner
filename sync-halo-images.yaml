@@ -479,7 +479,7 @@ Resources:
       Handler: index.lambda_handler
       MemorySize: 4196
       Timeout: 900
-      Runtime: python3.9
+      Runtime: python3.12
       Role: !GetAtt UpdateS3ObjectMetadataRole.Arn
       Environment:
         Variables:
@@ -507,6 +507,7 @@ Resources:
             from traceback import print_exc
             from multiprocessing import Process
             from time import sleep
+            from itertools import batched
 
             datasync_client = client("datasync")
             logs_client = client("logs")
@@ -589,15 +590,16 @@ Resources:
                 )
 
                 try:
-                    processes = []
-                    for key in get_synced_object_keys(execution_status):
-                        print(f"Update metadata: s3://{bucket}/{key}")
-                        # update_smb_metadata(bucket, key) in parallel
-                        p = Process(target=update_smb_metadata, args = [bucket, key])
-                        p.start()
-                        processes.append(p)
-                    for p in processes:
-                        p.join()
+                    for batch_keys in batched(get_synced_object_keys(execution_status), 200):
+                        processes = []
+                        for key in batch_keys:
+                            print(f"Update metadata: s3://{bucket}/{key}")
+                            # update_smb_metadata(bucket, key) in parallel
+                            p = Process(target=update_smb_metadata, args=[bucket, key])
+                            p.start()
+                            processes.append(p)
+                        for p in processes:
+                            p.join()
                 except Exception as error:
                     print_exc()
                     sns_client.publish(

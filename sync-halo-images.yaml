@@ -102,7 +102,7 @@ Resources:
       DestinationLocationArn: !Sub "arn:aws:datasync:${AWS::Region}:${AWS::AccountId}:location/${DestinationLocationId}"
       Options: 
           LogLevel: TRANSFER
-          OverwriteMode: ALWAYS
+          OverwriteMode: NEVER
           PreserveDeletedFiles: PRESERVE
           TaskQueueing: ENABLED
           TransferMode: CHANGED

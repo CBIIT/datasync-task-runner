@@ -186,14 +186,12 @@ Resources:
               # execute task and return task execution ARN
               if getenv("SyncAllFiles") == "true":
                   return client("datasync").start_task_execution(
-                      TaskArn=getenv("TaskArn"),
-                      OverrideOptions={"TransferMode": "ALL"}
+                      TaskArn=getenv("TaskArn")
                   )
               else:
                   return client("datasync").start_task_execution(
                     TaskArn=getenv("TaskArn"),
-                    Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}],
-                    OverrideOptions={"TransferMode": "ALL"}
+                    Includes=[{"FilterType": "SIMPLE_PATTERN", "Value": sync_folder}]
                   )
     DependsOn: 
       - DataSyncTask
